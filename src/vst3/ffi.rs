@@ -163,6 +163,22 @@ extern "C" {
     /// - Returned pointer must be freed with `rack_vst3_plugin_free`
     pub fn rack_vst3_plugin_new(path: *const c_char, uid: *const c_char) -> *mut RackVST3Plugin;
 
+    /// Create a new plugin instance from bundle path alone (no UID needed)
+    ///
+    /// Loads the module directly and picks the first audio effect class.
+    /// This is the fast path — no directory scanning.
+    ///
+    /// # Safety
+    ///
+    /// - `path` must be a valid null-terminated C string pointing to a .vst3 bundle
+    /// - `out_name` can be NULL, or must point to a buffer with at least `name_size` bytes
+    /// - Returned pointer must be freed with `rack_vst3_plugin_free`
+    pub fn rack_vst3_plugin_new_from_path(
+        path: *const c_char,
+        out_name: *mut c_char,
+        name_size: usize,
+    ) -> *mut RackVST3Plugin;
+
     /// Free plugin instance
     ///
     /// # Safety
@@ -496,6 +512,30 @@ extern "C" {
         events: *const RackVST3MidiEvent,
         event_count: u32,
     ) -> c_int;
+
+    // GUI API
+    pub fn rack_vst3_plugin_has_editor(plugin: *mut RackVST3Plugin) -> c_int;
+    pub fn rack_vst3_plugin_can_resize(plugin: *mut RackVST3Plugin) -> c_int;
+    pub fn rack_vst3_plugin_get_editor_size(
+        plugin: *mut RackVST3Plugin,
+        width: *mut i32,
+        height: *mut i32,
+    ) -> c_int;
+    pub fn rack_vst3_plugin_open_editor(
+        plugin: *mut RackVST3Plugin,
+        parent: *mut std::ffi::c_void,
+    ) -> c_int;
+    pub fn rack_vst3_plugin_set_resize_callback(
+        plugin: *mut RackVST3Plugin,
+        callback: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, i32)>,
+        context: *mut std::ffi::c_void,
+    );
+    pub fn rack_vst3_plugin_notify_size(
+        plugin: *mut RackVST3Plugin,
+        width: i32,
+        height: i32,
+    ) -> c_int;
+    pub fn rack_vst3_plugin_close_editor(plugin: *mut RackVST3Plugin) -> c_int;
 }
 
 // MIDI event struct (matches C layout exactly)

@@ -8,6 +8,7 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 
 #if defined(__APPLE__)
     #include <CoreFoundation/CoreFoundation.h>
@@ -185,9 +186,16 @@ int rack_vst3_scanner_scan(RackVST3Scanner* scanner, RackVST3PluginInfo* plugins
 
     // Determine which paths to scan
     std::vector<std::string> paths_to_scan = scanner->search_paths;
+    bool has_custom_paths = !paths_to_scan.empty();
     if (paths_to_scan.empty()) {
         // No custom paths - use system defaults
         paths_to_scan = get_default_vst3_paths();
+    }
+
+    fprintf(stderr, "[rack_vst3_scanner_scan] custom_paths=%d, paths_to_scan=%zu\n",
+            has_custom_paths, paths_to_scan.size());
+    for (const auto& p : paths_to_scan) {
+        fprintf(stderr, "[rack_vst3_scanner_scan]   path: %s\n", p.c_str());
     }
 
     // Collect all module paths by scanning directories for .vst3 bundles
@@ -195,20 +203,31 @@ int rack_vst3_scanner_scan(RackVST3Scanner* scanner, RackVST3PluginInfo* plugins
 
     for (const auto& search_path : paths_to_scan) {
         auto found_bundles = scan_directory_for_vst3(search_path);
+        fprintf(stderr, "[rack_vst3_scanner_scan]   dir '%s' -> %zu bundles\n",
+                search_path.c_str(), found_bundles.size());
         module_paths.insert(module_paths.end(), found_bundles.begin(), found_bundles.end());
     }
 
-    // Also include system-discovered modules (from getModulePaths)
-    // This ensures we find all plugins even if custom paths are specified
-    auto system_modules = Hosting::Module::getModulePaths();
-    module_paths.insert(module_paths.end(), system_modules.begin(), system_modules.end());
+    // Only include system-discovered modules when no custom paths are specified.
+    // When custom paths ARE specified (e.g. loading a single plugin), we restrict
+    // scanning to those paths only — otherwise every load triggers a full system scan.
+    if (!has_custom_paths) {
+        auto system_modules = Hosting::Module::getModulePaths();
+        fprintf(stderr, "[rack_vst3_scanner_scan]   system modules: %zu\n", system_modules.size());
+        module_paths.insert(module_paths.end(), system_modules.begin(), system_modules.end());
+    } else {
+        fprintf(stderr, "[rack_vst3_scanner_scan]   SKIPPING system modules (custom paths set)\n");
+    }
 
     // Remove duplicates (in case same plugin is in both custom and system paths)
     std::sort(module_paths.begin(), module_paths.end());
     module_paths.erase(std::unique(module_paths.begin(), module_paths.end()), module_paths.end());
 
+    fprintf(stderr, "[rack_vst3_scanner_scan] Total modules to scan: %zu\n", module_paths.size());
+
     // Scan all found modules
     for (const auto& module_path : module_paths) {
+        fprintf(stderr, "[rack_vst3_scanner_scan]   loading module: %s\n", module_path.c_str());
         std::string error_description;
         auto module = Hosting::Module::create(module_path, error_description);
 

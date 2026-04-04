@@ -12,6 +12,7 @@
 #include "pluginterfaces/vst/ivstunits.h"
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
+#include "pluginterfaces/gui/iplugview.h"
 
 #include <vector>
 #include <string>
@@ -26,6 +27,48 @@ using namespace Steinberg::Vst;
 // Global mutex for VST3 lifecycle operations
 // VST3 module loading/unloading is not guaranteed to be thread-safe
 static std::mutex g_vst3_lifecycle_mutex;
+
+// Forward declaration
+struct RackVST3Plugin;
+
+// IComponentHandler: receives parameter change notifications from the plugin editor.
+// Queues changes so they're applied in the next process() call via inputParameterChanges.
+class RackComponentHandler : public IComponentHandler {
+public:
+    RackComponentHandler() : refCount(1), plugin(nullptr) {}
+
+    void setPlugin(RackVST3Plugin* p) { plugin = p; }
+
+    tresult PLUGIN_API beginEdit(ParamID /*id*/) override { return kResultTrue; }
+
+    tresult PLUGIN_API performEdit(ParamID id, ParamValue valueNormalized) override;
+
+    tresult PLUGIN_API endEdit(ParamID /*id*/) override { return kResultTrue; }
+
+    tresult PLUGIN_API restartComponent(int32 /*flags*/) override { return kResultTrue; }
+
+    // FUnknown
+    tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(_iid, IComponentHandler::iid) ||
+            FUnknownPrivate::iidEqual(_iid, FUnknown::iid)) {
+            addRef();
+            *obj = static_cast<IComponentHandler*>(this);
+            return kResultTrue;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return ++refCount; }
+    uint32 PLUGIN_API release() override {
+        uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<uint32> refCount;
+    RackVST3Plugin* plugin;  // non-owning
+};
 
 // Helper: Convert UTF-16 to UTF-8
 // VST3 uses char16 (UTF-16) for strings
@@ -245,6 +288,8 @@ tresult PLUGIN_API MemoryStream::queryInterface(const TUID _iid, void** obj) {
 }
 
 // Internal plugin state
+class SimplePlugFrame; // forward declaration
+
 struct RackVST3Plugin {
     // Module and factory
     Hosting::Module::Ptr module;
@@ -282,6 +327,17 @@ struct RackVST3Plugin {
     std::vector<float*> input_ptrs;
     std::vector<float*> output_ptrs;
 
+    // GUI
+    IPtr<IPlugView> plug_view;
+    SimplePlugFrame* plug_frame = nullptr;
+
+    // Component handler (receives editor parameter changes)
+    RackComponentHandler* component_handler = nullptr;
+
+    // Pending parameter changes from the editor (thread-safe queue)
+    std::mutex pending_params_mutex;
+    std::vector<std::pair<ParamID, ParamValue>> pending_params;
+
     // Parameter cache
     struct ParameterInfo {
         ParamID id;
@@ -301,6 +357,14 @@ struct RackVST3Plugin {
     };
     std::vector<PresetInfo> presets;
 };
+
+// Deferred implementation — needs complete RackVST3Plugin type.
+tresult PLUGIN_API RackComponentHandler::performEdit(ParamID id, ParamValue valueNormalized) {
+    if (!plugin) return kResultFalse;
+    std::lock_guard<std::mutex> lock(plugin->pending_params_mutex);
+    plugin->pending_params.emplace_back(id, valueNormalized);
+    return kResultTrue;
+}
 
 // ============================================================================
 // Plugin Instance Implementation
@@ -396,6 +460,129 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
         }
     }
 
+    // Set up component handler so editor parameter changes reach the processor
+    if (plugin->controller) {
+        plugin->component_handler = new RackComponentHandler();
+        plugin->component_handler->setPlugin(plugin);
+        plugin->controller->setComponentHandler(plugin->component_handler);
+    }
+
+    return plugin;
+}
+
+RackVST3Plugin* rack_vst3_plugin_new_from_path(const char* path, char* out_name, size_t name_size) {
+    if (!path) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(g_vst3_lifecycle_mutex);
+
+    // Load the module directly from the bundle path — no directory scanning
+    std::string error_description;
+    auto module = Hosting::Module::create(std::string(path), error_description);
+    if (!module) {
+        fprintf(stderr, "[rack] Failed to load module '%s': %s\n", path, error_description.c_str());
+        return nullptr;
+    }
+
+    // Find the first audio effect class in this module
+    const auto& factory = module->getFactory();
+    auto class_infos = factory.classInfos();
+
+    VST3::UID found_uid;
+    std::string found_name;
+    bool found = false;
+
+    for (const auto& class_info : class_infos) {
+        if (class_info.category() == kVstAudioEffectClass) {
+            found_uid = class_info.ID();
+            found_name = class_info.name();
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        fprintf(stderr, "[rack] No audio effect class found in '%s'\n", path);
+        return nullptr;
+    }
+
+    // Write plugin name to output buffer if provided
+    if (out_name && name_size > 0) {
+        strncpy(out_name, found_name.c_str(), name_size - 1);
+        out_name[name_size - 1] = '\0';
+    }
+
+    // Create the plugin instance using the discovered UID
+    auto plugin = new(std::nothrow) RackVST3Plugin();
+    if (!plugin) {
+        return nullptr;
+    }
+
+    plugin->path = path;
+    plugin->uid = found_uid;
+    plugin->module = std::move(module);
+
+    // Create component
+    plugin->component = factory.createInstance<IComponent>(plugin->uid);
+    if (!plugin->component) {
+        delete plugin;
+        return nullptr;
+    }
+
+    // Get processor interface
+    plugin->processor = U::cast<IAudioProcessor>(plugin->component);
+    if (!plugin->processor) {
+        delete plugin;
+        return nullptr;
+    }
+
+    // Initialize component
+    if (plugin->component->initialize(FUnknownPtr<IHostApplication>(new HostApplication())) != kResultOk) {
+        plugin->component = nullptr;
+        plugin->processor = nullptr;
+        plugin->module = nullptr;
+        delete plugin;
+        return nullptr;
+    }
+
+    // Try to get edit controller
+    TUID controllerCID;
+    if (plugin->component->getControllerClassId(controllerCID) == kResultTrue) {
+        VST3::UID controllerUID = VST3::UID::fromTUID(controllerCID);
+        plugin->controller = factory.createInstance<IEditController>(controllerUID);
+        if (plugin->controller) {
+            if (plugin->controller->initialize(FUnknownPtr<IHostApplication>(new HostApplication())) != kResultOk) {
+                plugin->component->terminate();
+                plugin->controller = nullptr;
+                plugin->component = nullptr;
+                plugin->processor = nullptr;
+                plugin->module = nullptr;
+                delete plugin;
+                return nullptr;
+            }
+        }
+    } else {
+        plugin->controller = U::cast<IEditController>(plugin->component);
+    }
+
+    // Set up connection points if controller is separate
+    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+        plugin->component_cp = U::cast<IConnectionPoint>(plugin->component);
+        plugin->controller_cp = U::cast<IConnectionPoint>(plugin->controller);
+        if (plugin->component_cp && plugin->controller_cp) {
+            plugin->component_cp->connect(plugin->controller_cp);
+            plugin->controller_cp->connect(plugin->component_cp);
+        }
+    }
+
+    // Set up component handler
+    if (plugin->controller) {
+        plugin->component_handler = new RackComponentHandler();
+        plugin->component_handler->setPlugin(plugin);
+        plugin->controller->setComponentHandler(plugin->component_handler);
+    }
+
     return plugin;
 }
 
@@ -406,10 +593,33 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
 
     std::lock_guard<std::mutex> lock(g_vst3_lifecycle_mutex);
 
+    // Close editor if open
+    rack_vst3_plugin_close_editor(plugin);
+
+    // Stop processing before deactivation
+    if (plugin->initialized && plugin->processor) {
+        plugin->processor->setProcessing(false);
+    }
+
     // Deactivate if active
     if (plugin->initialized && plugin->component) {
         plugin->component->setActive(false);
     }
+
+    // The process() function overwrites channelBuffers32 with caller-owned
+    // pointers. We must null them out before unprepare() or destroyBuffers()
+    // will try to delete[] memory it doesn't own.
+    if (plugin->process_data.inputs) {
+        for (int32 i = 0; i < plugin->process_data.numInputs; i++) {
+            plugin->process_data.inputs[i].channelBuffers32 = nullptr;
+        }
+    }
+    if (plugin->process_data.outputs) {
+        for (int32 i = 0; i < plugin->process_data.numOutputs; i++) {
+            plugin->process_data.outputs[i].channelBuffers32 = nullptr;
+        }
+    }
+    plugin->process_data.unprepare();
 
     // Disconnect connection points
     if (plugin->component_cp && plugin->controller_cp) {
@@ -421,6 +631,16 @@ void rack_vst3_plugin_free(RackVST3Plugin* plugin) {
     if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
         plugin->controller->terminate();
         plugin->controller = nullptr;
+    }
+
+    // Detach component handler
+    if (plugin->controller) {
+        plugin->controller->setComponentHandler(nullptr);
+    }
+    if (plugin->component_handler) {
+        plugin->component_handler->setPlugin(nullptr);
+        plugin->component_handler->release();
+        plugin->component_handler = nullptr;
     }
 
     // Terminate component
@@ -640,6 +860,20 @@ int rack_vst3_plugin_process(
     plugin->process_data.outputParameterChanges = &plugin->output_param_changes;
     plugin->process_data.inputEvents = &plugin->input_events;
     plugin->process_data.outputEvents = &plugin->output_events;
+
+    // Drain pending parameter changes from the editor into inputParameterChanges
+    {
+        std::lock_guard<std::mutex> lock(plugin->pending_params_mutex);
+        for (auto& [paramId, value] : plugin->pending_params) {
+            int32 index = 0;
+            auto* queue = plugin->input_param_changes.addParameterData(paramId, index);
+            if (queue) {
+                int32 sample_offset = 0;
+                queue->addPoint(0, value, sample_offset);
+            }
+        }
+        plugin->pending_params.clear();
+    }
 
     // Process
     tresult result = plugin->processor->process(plugin->process_data);
@@ -1212,5 +1446,165 @@ int rack_vst3_plugin_send_midi(
         }
     }
 
+    return RACK_VST3_OK;
+}
+
+// ============================================================================
+// GUI API
+// ============================================================================
+
+// IPlugFrame implementation — handles resize requests from the plugin.
+// Each plugin gets its own frame so the host can resize the correct NSWindow.
+class SimplePlugFrame : public IPlugFrame {
+public:
+    using ResizeCallback = void (*)(void* context, int32_t width, int32_t height);
+
+    SimplePlugFrame() : refCount(1), resizeCallback_(nullptr), callbackContext_(nullptr) {}
+
+    void setResizeCallback(ResizeCallback cb, void* ctx) {
+        resizeCallback_ = cb;
+        callbackContext_ = ctx;
+    }
+
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* newSize) override {
+        if (!view || !newSize) return kInvalidArgument;
+
+        int32_t w = newSize->getWidth();
+        int32_t h = newSize->getHeight();
+        fprintf(stderr, "[rack] plugin requested resize: %dx%d\n", w, h);
+
+        // Tell the host to resize the window first
+        if (resizeCallback_) {
+            resizeCallback_(callbackContext_, w, h);
+        }
+
+        // Then tell the plugin the new size is applied
+        return view->onSize(newSize);
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(_iid, IPlugFrame::iid) ||
+            FUnknownPrivate::iidEqual(_iid, FUnknown::iid)) {
+            addRef();
+            *obj = static_cast<IPlugFrame*>(this);
+            return kResultTrue;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return ++refCount; }
+    uint32 PLUGIN_API release() override {
+        uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<uint32> refCount;
+    ResizeCallback resizeCallback_;
+    void* callbackContext_;
+};
+
+int rack_vst3_plugin_has_editor(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->controller) return 0;
+    IPtr<IPlugView> view(plugin->controller->createView(ViewType::kEditor), false);
+    return view ? 1 : 0;
+}
+
+int rack_vst3_plugin_can_resize(RackVST3Plugin* plugin) {
+    if (!plugin || !plugin->controller) return 0;
+    if (plugin->plug_view) {
+        return plugin->plug_view->canResize() == kResultTrue ? 1 : 0;
+    }
+    // No active view — create a temporary one to check
+    IPtr<IPlugView> view(plugin->controller->createView(ViewType::kEditor), false);
+    if (!view) return 0;
+    return view->canResize() == kResultTrue ? 1 : 0;
+}
+
+int rack_vst3_plugin_get_editor_size(RackVST3Plugin* plugin, int32_t* width, int32_t* height) {
+    if (!plugin || !plugin->controller || !width || !height) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    // Use active plug_view if available (more accurate after resize)
+    if (plugin->plug_view) {
+        ViewRect rect{};
+        if (plugin->plug_view->getSize(&rect) == kResultTrue) {
+            *width = rect.getWidth();
+            *height = rect.getHeight();
+            return RACK_VST3_OK;
+        }
+    }
+    IPtr<IPlugView> view(plugin->controller->createView(ViewType::kEditor), false);
+    if (!view) return RACK_VST3_ERROR_NOT_SUPPORTED;
+
+    ViewRect rect{};
+    if (view->getSize(&rect) != kResultTrue) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    *width = rect.getWidth();
+    *height = rect.getHeight();
+    return RACK_VST3_OK;
+}
+
+int rack_vst3_plugin_open_editor(RackVST3Plugin* plugin, void* parent) {
+    if (!plugin || !plugin->controller || !parent) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+    if (plugin->plug_view) {
+        plugin->plug_view->removed();
+        plugin->plug_view = nullptr;
+    }
+
+    IPlugView* raw_view = plugin->controller->createView(ViewType::kEditor);
+    if (!raw_view) return RACK_VST3_ERROR_NOT_SUPPORTED;
+    plugin->plug_view = IPtr<IPlugView>(raw_view, false);
+
+    if (plugin->plug_view->isPlatformTypeSupported(kPlatformTypeNSView) != kResultTrue) {
+        plugin->plug_view = nullptr;
+        return RACK_VST3_ERROR_NOT_SUPPORTED;
+    }
+
+    // Create a per-plugin plug frame
+    if (plugin->plug_frame) {
+        plugin->plug_frame->release();
+    }
+    plugin->plug_frame = new SimplePlugFrame();
+    plugin->plug_view->setFrame(plugin->plug_frame);
+
+    if (plugin->plug_view->attached(parent, kPlatformTypeNSView) != kResultTrue) {
+        plugin->plug_view->setFrame(nullptr);
+        plugin->plug_view = nullptr;
+        return RACK_VST3_ERROR_GENERIC;
+    }
+
+    return RACK_VST3_OK;
+}
+
+void rack_vst3_plugin_set_resize_callback(
+    RackVST3Plugin* plugin,
+    void (*callback)(void* context, int32_t width, int32_t height),
+    void* context
+) {
+    if (!plugin || !plugin->plug_frame) return;
+    plugin->plug_frame->setResizeCallback(callback, context);
+}
+
+int rack_vst3_plugin_notify_size(RackVST3Plugin* plugin, int32_t width, int32_t height) {
+    if (!plugin || !plugin->plug_view) return RACK_VST3_ERROR_INVALID_PARAM;
+    ViewRect rect{0, 0, width, height};
+    return plugin->plug_view->onSize(&rect) == kResultTrue ? RACK_VST3_OK : RACK_VST3_ERROR_GENERIC;
+}
+
+int rack_vst3_plugin_close_editor(RackVST3Plugin* plugin) {
+    if (!plugin) return RACK_VST3_ERROR_INVALID_PARAM;
+    if (!plugin->plug_view) return RACK_VST3_OK;
+    plugin->plug_view->removed();
+    plugin->plug_view->setFrame(nullptr);
+    plugin->plug_view = nullptr;
+    if (plugin->plug_frame) {
+        plugin->plug_frame->release();
+        plugin->plug_frame = nullptr;
+    }
     return RACK_VST3_OK;
 }

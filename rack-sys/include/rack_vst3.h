@@ -88,6 +88,15 @@ int rack_vst3_scanner_scan(RackVST3Scanner* scanner, RackVST3PluginInfo* plugins
 // Returns plugin instance or NULL on error
 RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid);
 
+// Create a new plugin instance from bundle path alone (no UID needed)
+// Loads the module and picks the first audio effect class.
+// This is the fast path — no directory scanning.
+// path: path to .vst3 bundle (e.g. "/Library/Audio/Plug-Ins/VST3/Vital.vst3")
+// out_name: output buffer for the plugin name (optional, can be NULL)
+// name_size: size of out_name buffer
+// Returns plugin instance or NULL on error
+RackVST3Plugin* rack_vst3_plugin_new_from_path(const char* path, char* out_name, size_t name_size);
+
 // Free plugin instance
 void rack_vst3_plugin_free(RackVST3Plugin* plugin);
 
@@ -282,6 +291,45 @@ int rack_vst3_plugin_send_midi(
     const RackVST3MidiEvent* events,
     uint32_t event_count
 );
+
+// ============================================================================
+// GUI API
+// ============================================================================
+
+// Check if the plugin has an editor view
+// Returns 1 if editor is available, 0 if not
+int rack_vst3_plugin_has_editor(RackVST3Plugin* plugin);
+
+// Check if the plugin's editor supports resizing
+// Returns 1 if resizable, 0 if not
+int rack_vst3_plugin_can_resize(RackVST3Plugin* plugin);
+
+// Get the editor view size (in logical points)
+// width/height are output parameters
+// Returns 0 on success, negative error code on failure
+int rack_vst3_plugin_get_editor_size(RackVST3Plugin* plugin, int32_t* width, int32_t* height);
+
+// Open the editor view and attach to the given NSView parent (macOS)
+// parent: an NSView* to attach the plugin editor to
+// Returns 0 on success, negative error code on failure
+int rack_vst3_plugin_open_editor(RackVST3Plugin* plugin, void* parent);
+
+// Set a callback for when the plugin requests a resize
+// The callback receives the new width and height
+void rack_vst3_plugin_set_resize_callback(
+    RackVST3Plugin* plugin,
+    void (*callback)(void* context, int32_t width, int32_t height),
+    void* context
+);
+
+// Notify the plugin that the host window has been resized
+// Call this when the NSWindow content view changes size
+// Returns 0 on success, negative error code on failure
+int rack_vst3_plugin_notify_size(RackVST3Plugin* plugin, int32_t width, int32_t height);
+
+// Close the editor view
+// Returns 0 on success, negative error code on failure
+int rack_vst3_plugin_close_editor(RackVST3Plugin* plugin);
 
 #ifdef __cplusplus
 }

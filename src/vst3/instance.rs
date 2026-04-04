@@ -72,10 +72,134 @@ impl Vst3Plugin {
         }
     }
 
+    /// Load a VST3 plugin directly from its bundle path — **no directory scanning**.
+    ///
+    /// This is the fast path: it loads the single .vst3 module and picks the first
+    /// audio effect class. Returns the plugin instance and its discovered name.
+    pub fn load_from_path(bundle_path: &str) -> Result<Self> {
+        let path_cstr = CString::new(bundle_path)
+            .map_err(|_| Error::Other("Bundle path contains null byte".to_string()))?;
+
+        let mut name_buf = [0i8; 256];
+
+        let ptr = unsafe {
+            ffi::rack_vst3_plugin_new_from_path(
+                path_cstr.as_ptr(),
+                name_buf.as_mut_ptr(),
+                name_buf.len(),
+            )
+        };
+
+        if ptr.is_null() {
+            return Err(Error::PluginNotFound(format!(
+                "Failed to load VST3 bundle: {bundle_path}"
+            )));
+        }
+
+        // Extract the discovered plugin name
+        let name = unsafe {
+            std::ffi::CStr::from_ptr(name_buf.as_ptr())
+                .to_str()
+                .unwrap_or("Unknown")
+                .to_string()
+        };
+
+        let info = PluginInfo::new(
+            name,
+            String::new(), // manufacturer not available from this path
+            0,
+            crate::PluginType::Effect, // will be refined after initialization
+            std::path::PathBuf::from(bundle_path),
+            String::new(), // UID discovered internally by C++
+        );
+
+        Ok(Self {
+            inner: NonNull::new(ptr).expect("pointer is non-null after null check"),
+            info,
+            input_ptrs: Vec::new(),
+            output_ptrs: Vec::new(),
+            input_channels: 0,
+            output_channels: 0,
+            _not_sync: PhantomData,
+        })
+    }
+
+    /// Get the number of input channels the plugin expects.
+    pub fn input_channels(&self) -> usize {
+        self.input_channels
+    }
+
+    /// Get the number of output channels the plugin produces.
+    pub fn output_channels(&self) -> usize {
+        self.output_channels
+    }
+
+    /// Check if the plugin has a GUI editor.
+    pub fn has_editor(&self) -> bool {
+        unsafe { ffi::rack_vst3_plugin_has_editor(self.inner.as_ptr()) > 0 }
+    }
+
+    /// Get the editor view size in logical points. Returns (width, height).
+    pub fn get_editor_size(&self) -> Result<(i32, i32)> {
+        let mut w: i32 = 0;
+        let mut h: i32 = 0;
+        let r = unsafe { ffi::rack_vst3_plugin_get_editor_size(self.inner.as_ptr(), &mut w, &mut h) };
+        if r != ffi::RACK_VST3_OK { return Err(map_error(r)); }
+        Ok((w, h))
+    }
+
+    /// Open the editor, attaching it to the given NSView parent pointer.
+    ///
+    /// # Safety
+    /// `parent` must be a valid NSView pointer. Must be called on the main thread.
+    pub unsafe fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
+        let r = ffi::rack_vst3_plugin_open_editor(self.inner.as_ptr(), parent);
+        if r != ffi::RACK_VST3_OK { return Err(map_error(r)); }
+        Ok(())
+    }
+
+    /// Check if the plugin's editor supports resizing.
+    pub fn can_resize(&self) -> bool {
+        unsafe { ffi::rack_vst3_plugin_can_resize(self.inner.as_ptr()) > 0 }
+    }
+
+    /// Set a callback that fires when the plugin requests a resize.
+    ///
+    /// # Safety
+    /// The callback and context must remain valid for the lifetime of the editor.
+    pub unsafe fn set_resize_callback(
+        &mut self,
+        callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32, i32),
+        context: *mut std::ffi::c_void,
+    ) {
+        ffi::rack_vst3_plugin_set_resize_callback(
+            self.inner.as_ptr(),
+            Some(callback),
+            context,
+        );
+    }
+
+    /// Notify the plugin that the host window has been resized.
+    pub fn notify_size(&mut self, width: i32, height: i32) -> Result<()> {
+        let r = unsafe { ffi::rack_vst3_plugin_notify_size(self.inner.as_ptr(), width, height) };
+        if r != ffi::RACK_VST3_OK { return Err(map_error(r)); }
+        Ok(())
+    }
+
+    /// Close the editor view.
+    pub fn close_editor(&mut self) {
+        unsafe { ffi::rack_vst3_plugin_close_editor(self.inner.as_ptr()); }
+    }
 }
 
 impl Drop for Vst3Plugin {
     fn drop(&mut self) {
+        // Clear the pointer arrays before freeing the C++ object to avoid
+        // heap corruption if the C++ destructor interferes with Rust allocations.
+        self.input_ptrs.clear();
+        self.input_ptrs.shrink_to_fit();
+        self.output_ptrs.clear();
+        self.output_ptrs.shrink_to_fit();
         unsafe {
             ffi::rack_vst3_plugin_free(self.inner.as_ptr());
         }
@@ -155,11 +279,9 @@ impl PluginInstance for Vst3Plugin {
             )));
         }
 
-        // Defense-in-depth: Catch initialization bugs where channel counts are zero
-        // This is technically redundant (covered by checks above) but guards against
-        // future bugs in initialize() that could leave channels at zero
-        if inputs.is_empty() || outputs.is_empty() {
-            return Err(Error::Other("Empty input or output channels".to_string()));
+        // Defense-in-depth: outputs must not be empty (instruments produce audio)
+        if outputs.is_empty() {
+            return Err(Error::Other("Empty output channels".to_string()));
         }
 
         // Validate all channels have the same length
