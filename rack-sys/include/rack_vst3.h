@@ -331,6 +331,121 @@ int rack_vst3_plugin_notify_size(RackVST3Plugin* plugin, int32_t width, int32_t 
 // Returns 0 on success, negative error code on failure
 int rack_vst3_plugin_close_editor(RackVST3Plugin* plugin);
 
+// ============================================================================
+// ARA (Audio Random Access) API
+// ============================================================================
+
+// Check if plugin supports ARA (Melodyne, etc.)
+// Returns 1 if ARA-capable, 0 if not
+int rack_vst3_plugin_has_ara(RackVST3Plugin* plugin);
+
+// Get ARA factory from plugin (opaque pointer)
+// Returns pointer to ARAFactory, or NULL if not ARA-capable
+const void* rack_vst3_plugin_get_ara_factory(RackVST3Plugin* plugin);
+
+// Get ARA factory info (plugin name, manufacturer, supported API generation)
+// Returns 0 on success, negative error code on failure
+int rack_vst3_plugin_get_ara_factory_info(
+    RackVST3Plugin* plugin,
+    char* plugin_name, size_t name_size,
+    char* manufacturer, size_t mfr_size,
+    int32_t* highest_supported_api
+);
+
+// Initialize ARA on the factory (call once before creating document controllers)
+// Returns 0 on success, negative error code on failure
+int rack_vst3_ara_init(RackVST3Plugin* plugin);
+
+// Shutdown ARA on the factory
+void rack_vst3_ara_uninit(RackVST3Plugin* plugin);
+
+// Host callback function pointer types (Rust implements these)
+typedef void* (*RackAraCreateAudioReaderFn)(void* ctx, void* source_host_ref, int use_64bit);
+typedef int (*RackAraReadAudioSamplesFn)(void* ctx, void* reader_ref, int64_t pos, int64_t count, void** buffers);
+typedef void (*RackAraDestroyAudioReaderFn)(void* ctx, void* reader_ref);
+typedef size_t (*RackAraGetArchiveSizeFn)(void* ctx, void* archive_ref);
+typedef int (*RackAraReadArchiveFn)(void* ctx, void* archive_ref, size_t pos, size_t len, uint8_t* buf);
+typedef int (*RackAraWriteArchiveFn)(void* ctx, void* archive_ref, size_t pos, size_t len, const uint8_t* buf);
+
+// Host callbacks struct (Rust fills this in)
+typedef struct {
+    void* context;  // Rust-side AraHost pointer
+    RackAraCreateAudioReaderFn create_audio_reader;
+    RackAraReadAudioSamplesFn read_audio_samples;
+    RackAraDestroyAudioReaderFn destroy_audio_reader;
+    RackAraGetArchiveSizeFn get_archive_size;
+    RackAraReadArchiveFn read_archive;
+    RackAraWriteArchiveFn write_archive;
+} RackAraHostCallbacks;
+
+// Create ARA document controller with host callbacks
+// Returns opaque document controller handle, or NULL on failure
+void* rack_vst3_ara_create_document_controller(
+    RackVST3Plugin* plugin,
+    const RackAraHostCallbacks* callbacks,
+    const char* document_name
+);
+
+// Destroy document controller
+void rack_vst3_ara_destroy_document_controller(void* controller);
+
+// Bind plugin instance to document controller with roles
+// roles: bitmask (1=PlaybackRenderer, 2=EditorRenderer, 4=EditorView)
+// Returns 0 on success, negative error code on failure
+int rack_vst3_ara_bind_to_document(
+    RackVST3Plugin* plugin,
+    void* controller,
+    uint32_t roles
+);
+
+// === Document Model Operations ===
+
+// Create audio source (tells ARA about an audio file)
+void* rack_vst3_ara_create_audio_source(
+    void* controller,
+    void* host_ref,
+    const char* name,
+    const char* persistent_id,
+    int64_t sample_count,
+    double sample_rate,
+    int32_t channel_count
+);
+
+// Enable/disable sample access on audio source
+int rack_vst3_ara_enable_audio_source_access(void* controller, void* source, int enable);
+
+// Create audio modification (an edit of an audio source)
+void* rack_vst3_ara_create_audio_modification(
+    void* controller,
+    void* audio_source,
+    void* host_ref,
+    const char* name,
+    const char* persistent_id
+);
+
+// Create playback region (a time range that plays a modification)
+void* rack_vst3_ara_create_playback_region(
+    void* controller,
+    void* audio_modification,
+    void* host_ref,
+    double start_in_mod,
+    double duration_in_mod,
+    double start_in_playback,
+    double duration_in_playback
+);
+
+// Destroy model objects
+void rack_vst3_ara_destroy_playback_region(void* controller, void* region);
+void rack_vst3_ara_destroy_audio_modification(void* controller, void* modification);
+void rack_vst3_ara_destroy_audio_source(void* controller, void* source);
+
+// Begin/end editing (bracket model changes)
+void rack_vst3_ara_begin_editing(void* controller);
+void rack_vst3_ara_end_editing(void* controller);
+
+// Notify model updates (call after changes)
+void rack_vst3_ara_notify_model_updates(void* controller);
+
 #ifdef __cplusplus
 }
 #endif

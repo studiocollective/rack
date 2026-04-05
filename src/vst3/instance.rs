@@ -190,6 +190,96 @@ impl Vst3Plugin {
     pub fn close_editor(&mut self) {
         unsafe { ffi::rack_vst3_plugin_close_editor(self.inner.as_ptr()); }
     }
+
+    // ========================================================================
+    // ARA (Audio Random Access) support
+    // ========================================================================
+
+    /// Check if this plugin supports ARA (e.g., Melodyne).
+    pub fn has_ara(&self) -> bool {
+        unsafe { ffi::rack_vst3_plugin_has_ara(self.inner.as_ptr()) != 0 }
+    }
+
+    /// Get ARA factory info (plugin name, manufacturer, API version).
+    pub fn ara_factory_info(&self) -> Option<super::ara::AraFactoryInfo> {
+        let mut name_buf = [0i8; 256];
+        let mut mfr_buf = [0i8; 256];
+        let mut api: i32 = 0;
+        let rc = unsafe {
+            ffi::rack_vst3_plugin_get_ara_factory_info(
+                self.inner.as_ptr(),
+                name_buf.as_mut_ptr(),
+                name_buf.len(),
+                mfr_buf.as_mut_ptr(),
+                mfr_buf.len(),
+                &mut api,
+            )
+        };
+        if rc != ffi::RACK_VST3_OK {
+            return None;
+        }
+        let name = super::util::cstr_to_string(&name_buf);
+        let manufacturer = super::util::cstr_to_string(&mfr_buf);
+        Some(super::ara::AraFactoryInfo {
+            plugin_name: name,
+            manufacturer,
+            highest_supported_api: api,
+        })
+    }
+
+    /// Initialize ARA on this plugin's factory.
+    /// Must be called before creating a document controller.
+    pub fn ara_init(&mut self) -> Result<()> {
+        let rc = unsafe { ffi::rack_vst3_ara_init(self.inner.as_ptr()) };
+        if rc != ffi::RACK_VST3_OK {
+            return Err(map_error(rc));
+        }
+        Ok(())
+    }
+
+    /// Shutdown ARA on this plugin's factory.
+    pub fn ara_uninit(&mut self) {
+        unsafe { ffi::rack_vst3_ara_uninit(self.inner.as_ptr()) }
+    }
+
+    /// Create an ARA document controller with host callbacks.
+    pub fn create_ara_document(
+        &mut self,
+        callbacks: &ffi::RackAraHostCallbacks,
+        document_name: &str,
+    ) -> Option<super::ara::AraDocumentController> {
+        let c_name = CString::new(document_name).ok()?;
+        let ptr = unsafe {
+            ffi::rack_vst3_ara_create_document_controller(
+                self.inner.as_ptr(),
+                callbacks,
+                c_name.as_ptr(),
+            )
+        };
+        NonNull::new(ptr).map(|handle| {
+            // Safety: handle is a valid, newly-created document controller
+            unsafe { super::ara::AraDocumentController::from_raw(handle) }
+        })
+    }
+
+    /// Bind this plugin instance to an ARA document controller with specific roles.
+    pub fn bind_ara(
+        &mut self,
+        controller: &super::ara::AraDocumentController,
+        roles: super::ara::AraRoles,
+    ) -> Result<()> {
+        let rc = unsafe {
+            ffi::rack_vst3_ara_bind_to_document(
+                self.inner.as_ptr(),
+                controller.raw(),
+                roles.bits(),
+            )
+        };
+        if rc != ffi::RACK_VST3_OK {
+            return Err(map_error(rc));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Vst3Plugin {

@@ -1608,3 +1608,13 @@ int rack_vst3_plugin_close_editor(RackVST3Plugin* plugin) {
     }
     return RACK_VST3_OK;
 }
+
+// ============================================================================
+// Accessor for ARA support (used by vst3_ara.cpp)
+// ============================================================================
+
+IPtr<IComponent>& rack_vst3_plugin_get_component(RackVST3Plugin* plugin) {
+    static IPtr<IComponent> null_component;
+    if (!plugin) return null_component;
+    return plugin->component;
+}

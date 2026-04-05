@@ -48,6 +48,7 @@ if(HAVE_VST3_SDK)
     set(RACK_VST3_SOURCES
         src/vst3_scanner.cpp
         src/vst3_instance.cpp
+        src/vst3_ara.cpp
     )
 
     # VST3 SDK base sources (required for FUID, FUnknown, etc.)
@@ -111,6 +112,18 @@ if(HAVE_VST3_SDK)
     target_include_directories(rack_sys PUBLIC
         ${VST3_SDK_PATH}
     )
+    # ARA SDK headers (for ARA support in VST3 plugins)
+    # ARA_SDK_PATH can be overridden by build.rs or user
+    if(NOT DEFINED ARA_SDK_PATH)
+        set(ARA_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../ara_sdk/ARA_API")
+    endif()
+    if(EXISTS "${ARA_SDK_PATH}/ARAInterface.h")
+        target_include_directories(rack_sys PUBLIC ${ARA_SDK_PATH})
+        target_compile_definitions(rack_sys PRIVATE RACK_HAS_ARA=1)
+        message(STATUS "ARA SDK found at ${ARA_SDK_PATH}")
+    else()
+        message(STATUS "ARA SDK not found at ${ARA_SDK_PATH} - ARA support disabled")
+    endif()
 endif()
 
 # Apple platform-specific settings

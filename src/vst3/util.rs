@@ -20,6 +20,16 @@ pub(crate) fn map_error(code: i32) -> Error {
     }
 }
 
+/// Convert a fixed-size C char array to a String (best-effort, lossy).
+/// Used for ARA factory info where exact error handling isn't needed.
+pub(crate) fn cstr_to_string(arr: &[i8]) -> String {
+    let bytes = unsafe { std::slice::from_raw_parts(arr.as_ptr() as *const u8, arr.len()) };
+    match CStr::from_bytes_until_nul(bytes) {
+        Ok(cstr) => cstr.to_string_lossy().into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
 /// Safely convert a fixed-size C char array to a Rust String
 ///
 /// This uses bounded string conversion to prevent UB even if the C++ code

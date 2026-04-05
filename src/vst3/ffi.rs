@@ -536,6 +536,134 @@ extern "C" {
         height: i32,
     ) -> c_int;
     pub fn rack_vst3_plugin_close_editor(plugin: *mut RackVST3Plugin) -> c_int;
+
+    // ============================================================================
+    // ARA API
+    // ============================================================================
+
+    pub fn rack_vst3_plugin_has_ara(plugin: *mut RackVST3Plugin) -> c_int;
+    pub fn rack_vst3_plugin_get_ara_factory(plugin: *mut RackVST3Plugin) -> *const std::ffi::c_void;
+    pub fn rack_vst3_plugin_get_ara_factory_info(
+        plugin: *mut RackVST3Plugin,
+        plugin_name: *mut c_char,
+        name_size: usize,
+        manufacturer: *mut c_char,
+        mfr_size: usize,
+        highest_supported_api: *mut i32,
+    ) -> c_int;
+    pub fn rack_vst3_ara_init(plugin: *mut RackVST3Plugin) -> c_int;
+    pub fn rack_vst3_ara_uninit(plugin: *mut RackVST3Plugin);
+
+    pub fn rack_vst3_ara_create_document_controller(
+        plugin: *mut RackVST3Plugin,
+        callbacks: *const RackAraHostCallbacks,
+        document_name: *const c_char,
+    ) -> *mut std::ffi::c_void;
+    pub fn rack_vst3_ara_destroy_document_controller(controller: *mut std::ffi::c_void);
+    pub fn rack_vst3_ara_bind_to_document(
+        plugin: *mut RackVST3Plugin,
+        controller: *mut std::ffi::c_void,
+        roles: u32,
+    ) -> c_int;
+
+    pub fn rack_vst3_ara_create_audio_source(
+        controller: *mut std::ffi::c_void,
+        host_ref: *mut std::ffi::c_void,
+        name: *const c_char,
+        persistent_id: *const c_char,
+        sample_count: i64,
+        sample_rate: f64,
+        channel_count: i32,
+    ) -> *mut std::ffi::c_void;
+    pub fn rack_vst3_ara_enable_audio_source_access(
+        controller: *mut std::ffi::c_void,
+        source: *mut std::ffi::c_void,
+        enable: c_int,
+    ) -> c_int;
+    pub fn rack_vst3_ara_create_audio_modification(
+        controller: *mut std::ffi::c_void,
+        audio_source: *mut std::ffi::c_void,
+        host_ref: *mut std::ffi::c_void,
+        name: *const c_char,
+        persistent_id: *const c_char,
+    ) -> *mut std::ffi::c_void;
+    pub fn rack_vst3_ara_create_playback_region(
+        controller: *mut std::ffi::c_void,
+        audio_modification: *mut std::ffi::c_void,
+        host_ref: *mut std::ffi::c_void,
+        start_in_mod: f64,
+        duration_in_mod: f64,
+        start_in_playback: f64,
+        duration_in_playback: f64,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn rack_vst3_ara_destroy_playback_region(
+        controller: *mut std::ffi::c_void,
+        region: *mut std::ffi::c_void,
+    );
+    pub fn rack_vst3_ara_destroy_audio_modification(
+        controller: *mut std::ffi::c_void,
+        modification: *mut std::ffi::c_void,
+    );
+    pub fn rack_vst3_ara_destroy_audio_source(
+        controller: *mut std::ffi::c_void,
+        source: *mut std::ffi::c_void,
+    );
+    pub fn rack_vst3_ara_begin_editing(controller: *mut std::ffi::c_void);
+    pub fn rack_vst3_ara_end_editing(controller: *mut std::ffi::c_void);
+    pub fn rack_vst3_ara_notify_model_updates(controller: *mut std::ffi::c_void);
+}
+
+// ARA host callbacks struct (matches C layout exactly)
+#[repr(C)]
+pub struct RackAraHostCallbacks {
+    pub context: *mut std::ffi::c_void,
+    pub create_audio_reader: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            source_host_ref: *mut std::ffi::c_void,
+            use_64bit: c_int,
+        ) -> *mut std::ffi::c_void,
+    >,
+    pub read_audio_samples: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            reader_ref: *mut std::ffi::c_void,
+            pos: i64,
+            count: i64,
+            buffers: *mut *mut std::ffi::c_void,
+        ) -> c_int,
+    >,
+    pub destroy_audio_reader: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            reader_ref: *mut std::ffi::c_void,
+        ),
+    >,
+    pub get_archive_size: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            archive_ref: *mut std::ffi::c_void,
+        ) -> usize,
+    >,
+    pub read_archive: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            archive_ref: *mut std::ffi::c_void,
+            pos: usize,
+            len: usize,
+            buf: *mut u8,
+        ) -> c_int,
+    >,
+    pub write_archive: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            archive_ref: *mut std::ffi::c_void,
+            pos: usize,
+            len: usize,
+            buf: *const u8,
+        ) -> c_int,
+    >,
 }
 
 // MIDI event struct (matches C layout exactly)
