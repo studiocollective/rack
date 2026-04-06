@@ -273,12 +273,21 @@ public:
     void clear() { buffer_.clear(); position_ = 0; }
 
 private:
-    uint32 ref_count_;  // Non-atomic - IMPLEMENT_REFCOUNT macro handles thread-safety
+    std::atomic<uint32> ref_count_;  // Atomic for thread-safety 
     std::vector<uint8_t> buffer_;
     int32 position_;
 };
 
-IMPLEMENT_REFCOUNT(MemoryStream)
+// We don't use IMPLEMENT_REFCOUNT to allow our custom release()
+// IMPLEMENT_REFCOUNT(MemoryStream)
+
+uint32 PLUGIN_API MemoryStream::addRef() { return ++ref_count_; }
+
+uint32 PLUGIN_API MemoryStream::release() {
+    uint32 r = --ref_count_;
+    // Intentionally do NOT 'delete this' if r == 0 to prevent double-free crashes.
+    return r;
+}
 
 tresult PLUGIN_API MemoryStream::queryInterface(const TUID _iid, void** obj) {
     QUERY_INTERFACE(_iid, obj, FUnknown::iid, IBStream)
@@ -1310,6 +1319,11 @@ int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size
         return RACK_VST3_ERROR_GENERIC;
     }
 
+    // Validate that the component state size marker is within bounds
+    if (component_state_size > size - sizeof(component_state_size)) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+
     // Set component state (reads from current position, right after size marker)
     result = plugin->component->setState(stream);
     if (result != kResultOk) {
@@ -1318,11 +1332,19 @@ int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size
 
     // Set controller state if separate controller
     if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
-        // Stream is now positioned right after component state
-        // Controller state follows immediately
-        result = plugin->controller->setState(stream);
-        if (result != kResultOk) {
-            return RACK_VST3_ERROR_GENERIC;
+        // Enforce exact alignment. Some plugins under-read their component block.
+        // We MUST seek past the component block to exactly where the controller block begins!
+        stream->seek(sizeof(uint32_t) + component_state_size, IBStream::kIBSeekSet, nullptr);
+        
+        int64 current_pos = 0;
+        stream->tell(&current_pos);
+        if (current_pos < static_cast<int64>(size)) {
+            // Stream has remaining data
+            // Controller state follows immediately
+            result = plugin->controller->setState(stream);
+            if (result != kResultOk) {
+                return RACK_VST3_ERROR_GENERIC;
+            }
         }
     }
 
