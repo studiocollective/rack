@@ -104,11 +104,18 @@ impl Vst3Plugin {
                 .to_string()
         };
 
+        // Query the actual plugin type from VST3 subcategories
+        let plugin_type = if unsafe { ffi::rack_vst3_plugin_is_instrument(ptr) } != 0 {
+            crate::PluginType::Instrument
+        } else {
+            crate::PluginType::Effect
+        };
+
         let info = PluginInfo::new(
             name,
             String::new(), // manufacturer not available from this path
             0,
-            crate::PluginType::Effect, // will be refined after initialization
+            plugin_type,
             std::path::PathBuf::from(bundle_path),
             String::new(), // UID discovered internally by C++
         );

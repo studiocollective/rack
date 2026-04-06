@@ -100,6 +100,10 @@ RackVST3Plugin* rack_vst3_plugin_new_from_path(const char* path, char* out_name,
 // Free plugin instance
 void rack_vst3_plugin_free(RackVST3Plugin* plugin);
 
+// Check if plugin is an instrument (based on VST3 subcategories)
+// Returns 1 if instrument, 0 if effect/other
+int rack_vst3_plugin_is_instrument(RackVST3Plugin* plugin);
+
 // Initialize plugin
 // Returns 0 on success, negative error code on failure
 int rack_vst3_plugin_initialize(RackVST3Plugin* plugin, double sample_rate, uint32_t max_block_size);

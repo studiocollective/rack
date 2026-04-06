@@ -314,6 +314,7 @@ struct RackVST3Plugin {
 
     // Plugin info
     std::string path;
+    std::string subcategories;  // VST3 subcategories (e.g. "Instrument|Synth")
     VST3::UID uid;
 
     // Audio configuration
@@ -502,10 +503,12 @@ RackVST3Plugin* rack_vst3_plugin_new_from_path(const char* path, char* out_name,
     std::string found_name;
     bool found = false;
 
+    std::string found_subcategories;
     for (const auto& class_info : class_infos) {
         if (class_info.category() == kVstAudioEffectClass) {
             found_uid = class_info.ID();
             found_name = class_info.name();
+            found_subcategories = class_info.subCategoriesString();
             found = true;
             break;
         }
@@ -529,6 +532,7 @@ RackVST3Plugin* rack_vst3_plugin_new_from_path(const char* path, char* out_name,
     }
 
     plugin->path = path;
+    plugin->subcategories = found_subcategories;
     plugin->uid = found_uid;
     plugin->module = std::move(module);
 
@@ -1629,6 +1633,21 @@ int rack_vst3_plugin_close_editor(RackVST3Plugin* plugin) {
         plugin->plug_frame = nullptr;
     }
     return RACK_VST3_OK;
+}
+
+// ============================================================================
+// Plugin type query (uses subcategories from the VST3 class info)
+// ============================================================================
+
+int rack_vst3_plugin_is_instrument(RackVST3Plugin* plugin) {
+    if (!plugin) return 0;
+    // Check subcategories for instrument-related keywords.
+    // VST3 uses "Instrument" as the canonical category, but some plugins
+    // use "Synth" or other variants.
+    const auto& sub = plugin->subcategories;
+    if (sub.find("Instrument") != std::string::npos) return 1;
+    if (sub.find("Synth") != std::string::npos) return 1;
+    return 0;
 }
 
 // ============================================================================

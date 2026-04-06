@@ -189,6 +189,10 @@ extern "C" {
     /// - If `plugin` is NULL, this function does nothing (safe no-op)
     pub fn rack_vst3_plugin_free(plugin: *mut RackVST3Plugin);
 
+    /// Check if plugin is an instrument (based on VST3 subcategories).
+    /// Returns 1 if instrument, 0 if effect/other.
+    pub fn rack_vst3_plugin_is_instrument(plugin: *mut RackVST3Plugin) -> i32;
+
     /// Initialize plugin with sample rate and buffer size
     ///
     /// # Returns
