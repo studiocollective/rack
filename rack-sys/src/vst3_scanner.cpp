@@ -326,3 +326,52 @@ int rack_vst3_scanner_scan(RackVST3Scanner* scanner, RackVST3PluginInfo* plugins
 
     return static_cast<int>(count);
 }
+
+int rack_vst3_probe_bundle(const char* bundle_path, RackVST3PluginInfo* out_info) {
+    if (!bundle_path || !out_info) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+
+    std::string error_description;
+    auto module = Hosting::Module::create(std::string(bundle_path), error_description);
+    if (!module) {
+        return RACK_VST3_ERROR_LOAD_FAILED;
+    }
+
+    const auto& factory = module->getFactory();
+    for (const auto& class_info : factory.classInfos()) {
+        if (class_info.category() != kVstAudioEffectClass) {
+            continue;
+        }
+
+        std::string name = class_info.name();
+        strncpy(out_info->name, name.c_str(), sizeof(out_info->name) - 1);
+        out_info->name[sizeof(out_info->name) - 1] = '\0';
+
+        std::string vendor = class_info.vendor();
+        if (vendor.empty()) {
+            vendor = factory.info().vendor();
+        }
+        strncpy(out_info->manufacturer, vendor.c_str(), sizeof(out_info->manufacturer) - 1);
+        out_info->manufacturer[sizeof(out_info->manufacturer) - 1] = '\0';
+
+        strncpy(out_info->path, bundle_path, sizeof(out_info->path) - 1);
+        out_info->path[sizeof(out_info->path) - 1] = '\0';
+
+        std::string uid_str = uid_to_string(class_info.ID());
+        strncpy(out_info->unique_id, uid_str.c_str(), sizeof(out_info->unique_id) - 1);
+        out_info->unique_id[sizeof(out_info->unique_id) - 1] = '\0';
+
+        out_info->version = 0;
+
+        std::string subcategories = class_info.subCategoriesString();
+        out_info->plugin_type = determine_plugin_type(subcategories);
+
+        strncpy(out_info->category, subcategories.c_str(), sizeof(out_info->category) - 1);
+        out_info->category[sizeof(out_info->category) - 1] = '\0';
+
+        return RACK_VST3_OK;
+    }
+
+    return RACK_VST3_ERROR_NOT_FOUND;
+}

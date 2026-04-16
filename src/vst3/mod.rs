@@ -5,5 +5,5 @@ mod instance;
 pub mod ara;
 
 pub use ffi::RackAraHostCallbacks;
-pub use scanner::Vst3Scanner;
+pub use scanner::{Vst3Scanner, probe_bundle};
 pub use instance::Vst3Plugin;

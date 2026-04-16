@@ -78,6 +78,12 @@ int rack_vst3_scanner_add_default_paths(RackVST3Scanner* scanner);
 // max_plugins: size of output array (ignored if plugins is NULL)
 int rack_vst3_scanner_scan(RackVST3Scanner* scanner, RackVST3PluginInfo* plugins, size_t max_plugins);
 
+// Probe a single .vst3 bundle for metadata only (no plugin instantiation).
+// Loads the module, reads the first audio effect class info, then unloads.
+// Safe to call from any thread — does not register timers or callbacks.
+// Returns 0 on success (info written to out_info), negative error code on failure.
+int rack_vst3_probe_bundle(const char* bundle_path, RackVST3PluginInfo* out_info);
+
 // ============================================================================
 // Plugin Instance API
 // ============================================================================

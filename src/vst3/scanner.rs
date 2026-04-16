@@ -202,6 +202,31 @@ impl Drop for Vst3Scanner {
     }
 }
 
+/// Probe a single `.vst3` bundle for metadata without instantiating the plugin.
+///
+/// Loads only the shared library, reads factory class info, and unloads.
+/// No components, controllers, or timers are created — safe on any thread.
+pub fn probe_bundle(bundle_path: &Path) -> Result<PluginInfo> {
+    let path_str = bundle_path.to_str()
+        .ok_or_else(|| Error::Other("Path contains invalid UTF-8".to_string()))?;
+
+    let path_cstr = CString::new(path_str)
+        .map_err(|_| Error::Other("Path contains null byte".to_string()))?;
+
+    let mut info_c = MaybeUninit::<ffi::RackVST3PluginInfo>::uninit();
+
+    let result = unsafe {
+        ffi::rack_vst3_probe_bundle(path_cstr.as_ptr(), info_c.as_mut_ptr())
+    };
+
+    if result != ffi::RACK_VST3_OK {
+        return Err(map_error(result));
+    }
+
+    let info_c = unsafe { info_c.assume_init() };
+    convert_plugin_info(&info_c)
+}
+
 impl PluginScanner for Vst3Scanner {
     type Plugin = Vst3Plugin;
 

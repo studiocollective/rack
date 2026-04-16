@@ -148,6 +148,25 @@ extern "C" {
         max_plugins: usize,
     ) -> c_int;
 
+    /// Probe a single `.vst3` bundle for metadata only (no plugin instantiation).
+    ///
+    /// Loads the module, reads the first audio effect class info, then unloads.
+    /// Does not create any components, controllers, or timers — safe on any thread.
+    ///
+    /// # Returns
+    ///
+    /// - 0 on success (info written to `out_info`)
+    /// - Negative error code on failure
+    ///
+    /// # Safety
+    ///
+    /// - `bundle_path` must be a valid null-terminated C string
+    /// - `out_info` must be a valid pointer to a `RackVST3PluginInfo`
+    pub fn rack_vst3_probe_bundle(
+        bundle_path: *const c_char,
+        out_info: *mut RackVST3PluginInfo,
+    ) -> c_int;
+
     // ============================================================================
     // Plugin Instance API
     // ============================================================================
