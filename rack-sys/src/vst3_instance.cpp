@@ -13,12 +13,17 @@
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
 #include "pluginterfaces/gui/iplugview.h"
+#include "public.sdk/source/vst/vstpresetfile.h"
 
 #include <vector>
 #include <string>
 #include <cstring>
 #include <mutex>
 #include <algorithm>
+
+// Defined in vst3_objc_helper.mm — main-thread dispatch with NSException catching.
+typedef int (*RackGenericFn)(void*);
+extern "C" int rack_vst3_dispatch_main(RackGenericFn fn, void* context);
 
 using namespace VST3;
 using namespace Steinberg;
@@ -374,6 +379,22 @@ tresult PLUGIN_API RackComponentHandler::performEdit(ParamID id, ParamValue valu
     std::lock_guard<std::mutex> lock(plugin->pending_params_mutex);
     plugin->pending_params.emplace_back(id, valueNormalized);
     return kResultTrue;
+}
+
+// Context for PresetFile::loadPreset dispatched to main thread.
+struct LoadPresetContext {
+    const uint8_t* data;
+    size_t size;
+    FUID classID;
+    IComponent* component;
+    IEditController* controller;
+};
+
+static int rack_call_load_preset(void* ctx) {
+    auto* c = static_cast<LoadPresetContext*>(ctx);
+    IPtr<MemoryStream> stream(new MemoryStream(c->data, c->size), false);
+    bool ok = Vst::PresetFile::loadPreset(stream, c->classID, c->component, c->controller);
+    return ok ? 0 : -2;
 }
 
 // ============================================================================
@@ -1218,9 +1239,13 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
     stream->tell(&component_start_pos);
 
     // Get component state
-    tresult result = plugin->component->getState(stream);
+    tresult result;
+    try {
+        result = plugin->component->getState(stream);
+    } catch (...) {
+        return 1024 * 1024;  // 1MB fallback
+    }
     if (result != kResultOk) {
-        // State serialization failed - return a safe default
         return 1024 * 1024;  // 1MB fallback
     }
 
@@ -1230,15 +1255,17 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin) {
 
     // Get controller state if separate controller
     if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
-        result = plugin->controller->getState(stream);
+        try {
+            result = plugin->controller->getState(stream);
+        } catch (...) {
+            return static_cast<int>(stream->getSize());
+        }
         if (result != kResultOk) {
-            // Controller state failed - return component state size only
             return static_cast<int>(stream->getSize());
         }
     }
 
     // Return actual state size
-    // This avoids the retry pattern - user gets correct size on first call
     return static_cast<int>(stream->getSize());
 }
 
@@ -1264,7 +1291,12 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     stream->tell(&component_start_pos);
 
     // Get component state
-    tresult result = plugin->component->getState(stream);
+    tresult result;
+    try {
+        result = plugin->component->getState(stream);
+    } catch (...) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
     if (result != kResultOk) {
         return RACK_VST3_ERROR_GENERIC;
     }
@@ -1283,10 +1315,12 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
 
     // Get controller state if separate controller
     if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
-        result = plugin->controller->getState(stream);
-        if (result != kResultOk) {
-            return RACK_VST3_ERROR_GENERIC;
+        try {
+            result = plugin->controller->getState(stream);
+        } catch (...) {
+            // Non-fatal: some controllers throw during getState
         }
+        // Non-fatal: proceed with component state only
     }
 
     // Copy to output buffer
@@ -1306,54 +1340,68 @@ int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* si
     return RACK_VST3_OK;
 }
 
+int rack_vst3_plugin_get_state_alloc(RackVST3Plugin* plugin, uint8_t** out_data, size_t* out_size) {
+    if (!plugin || !out_data || !out_size || !plugin->component) {
+        return RACK_VST3_ERROR_INVALID_PARAM;
+    }
+
+    *out_data = nullptr;
+    *out_size = 0;
+
+    // Use the VST3 SDK's standard PresetFile format for state serialization.
+    // This creates a properly tagged preset with 'VST3' header, class ID,
+    // and 'Comp'/'Cont' chunks — the format all hosts and plugins expect.
+    IPtr<MemoryStream> stream(new MemoryStream(), false);
+    FUID classID = FUID::fromTUID(plugin->uid.data());
+
+    IEditController* ctrl = nullptr;
+    if (plugin->controller &&
+        reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+        ctrl = plugin->controller.get();
+    }
+
+    bool ok;
+    try {
+        ok = Vst::PresetFile::savePreset(stream, classID, plugin->component.get(), ctrl);
+    } catch (...) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    if (!ok) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+
+    size_t state_size = stream->getSize();
+    uint8_t* buf = static_cast<uint8_t*>(malloc(state_size));
+    if (!buf) {
+        return RACK_VST3_ERROR_GENERIC;
+    }
+    memcpy(buf, stream->getData().data(), state_size);
+    *out_data = buf;
+    *out_size = state_size;
+
+    return RACK_VST3_OK;
+}
+
 int rack_vst3_plugin_set_state(RackVST3Plugin* plugin, const uint8_t* data, size_t size) {
     if (!plugin || !data || size == 0 || !plugin->component) {
         return RACK_VST3_ERROR_INVALID_PARAM;
     }
 
-    // Create memory stream from data (IPtr provides RAII cleanup)
-    IPtr<MemoryStream> stream(new MemoryStream(data, size), false);
+    // Use the VST3 SDK's PresetFile to load state — handles the standard
+    // preset format with tagged chunks and proper state separation.
+    // Dispatched to main thread for JUCE plugins that create NSWindow.
+    FUID classID = FUID::fromTUID(plugin->uid.data());
 
-    // Read component state size marker first (written at position 0 during serialization)
-    uint32_t component_state_size = 0;
-    int32 bytes_read = 0;
-    tresult result = stream->read(&component_state_size, sizeof(component_state_size), &bytes_read);
-
-    if (result != kResultOk || bytes_read != sizeof(component_state_size)) {
-        return RACK_VST3_ERROR_GENERIC;
+    IEditController* ctrl = nullptr;
+    if (plugin->controller &&
+        reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
+        ctrl = plugin->controller.get();
     }
 
-    // Validate that the component state size marker is within bounds
-    if (component_state_size > size - sizeof(component_state_size)) {
-        return RACK_VST3_ERROR_INVALID_PARAM;
-    }
+    LoadPresetContext ctx = { data, size, classID, plugin->component.get(), ctrl };
+    int result = rack_vst3_dispatch_main(rack_call_load_preset, &ctx);
 
-    // Set component state (reads from current position, right after size marker)
-    result = plugin->component->setState(stream);
-    if (result != kResultOk) {
-        return RACK_VST3_ERROR_GENERIC;
-    }
-
-    // Set controller state if separate controller
-    if (plugin->controller && reinterpret_cast<void*>(plugin->controller.get()) != reinterpret_cast<void*>(plugin->component.get())) {
-        // Enforce exact alignment. Some plugins under-read their component block.
-        // We MUST seek past the component block to exactly where the controller block begins!
-        stream->seek(sizeof(uint32_t) + component_state_size, IBStream::kIBSeekSet, nullptr);
-        
-        int64 current_pos = 0;
-        stream->tell(&current_pos);
-        if (current_pos < static_cast<int64>(size)) {
-            // Stream has remaining data
-            // Controller state follows immediately
-            result = plugin->controller->setState(stream);
-            if (result != kResultOk) {
-                return RACK_VST3_ERROR_GENERIC;
-            }
-        }
-    }
-
-    // IPtr automatically releases stream on scope exit
-    return RACK_VST3_OK;
+    return (result == 0) ? RACK_VST3_OK : RACK_VST3_ERROR_GENERIC;
 }
 
 // ============================================================================

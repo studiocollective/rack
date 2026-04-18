@@ -493,6 +493,21 @@ extern "C" {
         size: *mut usize,
     ) -> c_int;
 
+    /// Get plugin state in a single call — serializes once and returns a malloc'd buffer.
+    ///
+    /// On success, `*out_data` is a heap-allocated buffer (caller must `libc::free`) and
+    /// `*out_size` is its length.
+    ///
+    /// # Safety
+    ///
+    /// - `plugin` must be a valid pointer returned by `rack_vst3_plugin_new`
+    /// - Plugin must be initialized
+    pub fn rack_vst3_plugin_get_state_alloc(
+        plugin: *mut RackVST3Plugin,
+        out_data: *mut *mut u8,
+        out_size: *mut usize,
+    ) -> c_int;
+
     /// Set plugin state (restore full state including parameters, preset, etc.)
     ///
     /// # Returns

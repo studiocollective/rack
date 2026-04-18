@@ -252,6 +252,12 @@ int rack_vst3_plugin_get_state_size(RackVST3Plugin* plugin);
 // Thread-safety: Should be called from the same thread that owns the plugin instance.
 int rack_vst3_plugin_get_state(RackVST3Plugin* plugin, uint8_t* data, size_t* size);
 
+// Get plugin state in a single call — serializes once and returns a heap-allocated buffer.
+// *out_data is set to a malloc'd buffer (caller must free), *out_size to its length.
+// Returns 0 on success, negative error code on failure.
+// Thread-safety: Should be called from the same thread that owns the plugin instance.
+int rack_vst3_plugin_get_state_alloc(RackVST3Plugin* plugin, uint8_t** out_data, size_t* out_size);
+
 // Set plugin state (restore full state including parameters, preset, etc.)
 // data: state data (from previous get_state call)
 // size: size of state data in bytes

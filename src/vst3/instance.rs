@@ -662,38 +662,36 @@ impl PluginInstance for Vst3Plugin {
         }
 
         unsafe {
-            // Get state size
-            let size = ffi::rack_vst3_plugin_get_state_size(self.inner.as_ptr());
-            if size <= 0 {
-                return Err(Error::Other("Failed to get plugin state size".to_string()));
-            }
+            let mut out_data: *mut u8 = std::ptr::null_mut();
+            let mut out_size: usize = 0;
 
-            // Allocate buffer
-            let mut data = vec![0u8; size as usize];
-            let mut actual_size = data.len();
-
-            // Get state data
-            let result = ffi::rack_vst3_plugin_get_state(
+            let result = ffi::rack_vst3_plugin_get_state_alloc(
                 self.inner.as_ptr(),
-                data.as_mut_ptr(),
-                &mut actual_size,
+                &mut out_data,
+                &mut out_size,
             );
 
-            if result != ffi::RACK_VST3_OK {
+            extern "C" { fn free(ptr: *mut std::ffi::c_void); }
+
+            if result != ffi::RACK_VST3_OK || out_data.is_null() || out_size == 0 {
+                if !out_data.is_null() {
+                    free(out_data as *mut std::ffi::c_void);
+                }
                 return Err(map_error(result));
             }
 
-            // Resize to actual size
-            data.resize(actual_size, 0);
+            // Copy into a Vec and free the C buffer
+            let data = std::slice::from_raw_parts(out_data, out_size).to_vec();
+            free(out_data as *mut std::ffi::c_void);
 
             Ok(data)
         }
     }
 
     fn set_state(&mut self, data: &[u8]) -> Result<()> {
-        if !self.is_initialized() {
-            return Err(Error::NotInitialized);
-        }
+        // Note: no is_initialized() check — VST3 spec requires setState
+        // to be called BEFORE setActive/setProcessing (i.e. before our
+        // initialize). The C++ layer handles both pre- and post-init cases.
 
         if data.is_empty() {
             return Err(Error::Other("State data is empty".to_string()));

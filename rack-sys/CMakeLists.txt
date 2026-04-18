@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(rack_sys VERSION 0.1.0 LANGUAGES CXX)
+project(rack_sys VERSION 0.1.0 LANGUAGES CXX OBJCXX)
 
 # C++20 required for aligned allocation and modern C++ features
 set(CMAKE_CXX_STANDARD 20)
@@ -49,6 +49,7 @@ if(HAVE_VST3_SDK)
         src/vst3_scanner.cpp
         src/vst3_instance.cpp
         src/vst3_ara.cpp
+        src/vst3_objc_helper.mm
     )
 
     # VST3 SDK base sources (required for FUID, FUnknown, etc.)
@@ -70,6 +71,9 @@ if(HAVE_VST3_SDK)
         ${VST3_SDK_PATH}/public.sdk/source/vst/hosting/eventlist.cpp
         ${VST3_SDK_PATH}/public.sdk/source/vst/hosting/connectionproxy.cpp
         ${VST3_SDK_PATH}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
+        # Preset file support (standard VST3 state save/load format)
+        ${VST3_SDK_PATH}/public.sdk/source/vst/vstpresetfile.cpp
+        ${VST3_SDK_PATH}/base/source/fbuffer.cpp
     )
 
     # Platform-specific VST3 module loading
