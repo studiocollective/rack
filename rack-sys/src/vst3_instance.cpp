@@ -36,30 +36,57 @@ static std::mutex g_vst3_lifecycle_mutex;
 // Forward declaration
 struct RackVST3Plugin;
 
-// IComponentHandler: receives parameter change notifications from the plugin editor.
-// Queues changes so they're applied in the next process() call via inputParameterChanges.
-class RackComponentHandler : public IComponentHandler {
+// IComponentHandler + IComponentHandler2: receives parameter change and dirty
+// notifications from the plugin editor.
+class RackComponentHandler : public IComponentHandler, public IComponentHandler2 {
 public:
     RackComponentHandler() : refCount(1), plugin(nullptr) {}
 
     void setPlugin(RackVST3Plugin* p) { plugin = p; }
 
-    tresult PLUGIN_API beginEdit(ParamID /*id*/) override { return kResultTrue; }
-
+    // IComponentHandler
+    tresult PLUGIN_API beginEdit(ParamID id) override {
+        fprintf(stderr, "[rack:handler] beginEdit param=%u\n", id);
+        return kResultTrue;
+    }
     tresult PLUGIN_API performEdit(ParamID id, ParamValue valueNormalized) override;
+    tresult PLUGIN_API endEdit(ParamID id) override {
+        fprintf(stderr, "[rack:handler] endEdit param=%u\n", id);
+        return kResultTrue;
+    }
+    tresult PLUGIN_API restartComponent(int32 flags) override;
 
-    tresult PLUGIN_API endEdit(ParamID /*id*/) override { return kResultTrue; }
-
-    tresult PLUGIN_API restartComponent(int32 /*flags*/) override { return kResultTrue; }
+    // IComponentHandler2
+    tresult PLUGIN_API setDirty(TBool state) override;
+    tresult PLUGIN_API requestOpenEditor(FIDString name = ViewType::kEditor) override {
+        fprintf(stderr, "[rack:handler] requestOpenEditor name=%s\n", name ? name : "(null)");
+        return kResultFalse;
+    }
+    tresult PLUGIN_API startGroupEdit() override {
+        fprintf(stderr, "[rack:handler] startGroupEdit\n");
+        return kResultTrue;
+    }
+    tresult PLUGIN_API finishGroupEdit() override {
+        fprintf(stderr, "[rack:handler] finishGroupEdit\n");
+        return kResultTrue;
+    }
 
     // FUnknown
     tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
         if (FUnknownPrivate::iidEqual(_iid, IComponentHandler::iid) ||
             FUnknownPrivate::iidEqual(_iid, FUnknown::iid)) {
+            fprintf(stderr, "[rack:handler] queryInterface → IComponentHandler ✓\n");
             addRef();
             *obj = static_cast<IComponentHandler*>(this);
             return kResultTrue;
         }
+        if (FUnknownPrivate::iidEqual(_iid, IComponentHandler2::iid)) {
+            fprintf(stderr, "[rack:handler] queryInterface → IComponentHandler2 ✓\n");
+            addRef();
+            *obj = static_cast<IComponentHandler2*>(this);
+            return kResultTrue;
+        }
+        fprintf(stderr, "[rack:handler] queryInterface → unknown IID (not supported)\n");
         *obj = nullptr;
         return kNoInterface;
     }
@@ -371,13 +398,37 @@ struct RackVST3Plugin {
         std::string name;
     };
     std::vector<PresetInfo> presets;
+
+    // State-change callback (fired by restartComponent when plugin state changes)
+    void (*state_change_callback)(void* context, int32_t flags) = nullptr;
+    void* state_change_context = nullptr;
 };
 
-// Deferred implementation — needs complete RackVST3Plugin type.
+// Deferred implementations — need complete RackVST3Plugin type.
 tresult PLUGIN_API RackComponentHandler::performEdit(ParamID id, ParamValue valueNormalized) {
+    fprintf(stderr, "[rack:handler] performEdit param=%u value=%.4f\n", id, (double)valueNormalized);
     if (!plugin) return kResultFalse;
     std::lock_guard<std::mutex> lock(plugin->pending_params_mutex);
     plugin->pending_params.emplace_back(id, valueNormalized);
+    if (plugin->state_change_callback) {
+        plugin->state_change_callback(plugin->state_change_context, -1);
+    }
+    return kResultTrue;
+}
+
+tresult PLUGIN_API RackComponentHandler::restartComponent(int32 flags) {
+    fprintf(stderr, "[rack:handler] restartComponent flags=0x%x\n", flags);
+    if (plugin && plugin->state_change_callback) {
+        plugin->state_change_callback(plugin->state_change_context, flags);
+    }
+    return kResultTrue;
+}
+
+tresult PLUGIN_API RackComponentHandler::setDirty(TBool state) {
+    fprintf(stderr, "[rack:handler] setDirty state=%d\n", (int)state);
+    if (state && plugin && plugin->state_change_callback) {
+        plugin->state_change_callback(plugin->state_change_context, -2);
+    }
     return kResultTrue;
 }
 
@@ -495,7 +546,15 @@ RackVST3Plugin* rack_vst3_plugin_new(const char* path, const char* uid) {
     if (plugin->controller) {
         plugin->component_handler = new RackComponentHandler();
         plugin->component_handler->setPlugin(plugin);
-        plugin->controller->setComponentHandler(plugin->component_handler);
+        tresult hr = plugin->controller->setComponentHandler(plugin->component_handler);
+        fprintf(stderr, "[rack] setComponentHandler on '%s' → %s (controller=%p, same_as_component=%d)\n",
+                plugin->path.c_str(),
+                hr == kResultTrue ? "OK" : "FAILED",
+                (void*)plugin->controller.get(),
+                (int)(reinterpret_cast<void*>(plugin->controller.get()) == reinterpret_cast<void*>(plugin->component.get())));
+    } else {
+        fprintf(stderr, "[rack] WARNING: no controller for '%s' — cannot set component handler\n",
+                plugin->path.c_str());
     }
 
     return plugin;
@@ -614,7 +673,15 @@ RackVST3Plugin* rack_vst3_plugin_new_from_path(const char* path, char* out_name,
     if (plugin->controller) {
         plugin->component_handler = new RackComponentHandler();
         plugin->component_handler->setPlugin(plugin);
-        plugin->controller->setComponentHandler(plugin->component_handler);
+        tresult hr = plugin->controller->setComponentHandler(plugin->component_handler);
+        fprintf(stderr, "[rack] setComponentHandler on '%s' → %s (controller=%p, same_as_component=%d)\n",
+                plugin->path.c_str(),
+                hr == kResultTrue ? "OK" : "FAILED",
+                (void*)plugin->controller.get(),
+                (int)(reinterpret_cast<void*>(plugin->controller.get()) == reinterpret_cast<void*>(plugin->component.get())));
+    } else {
+        fprintf(stderr, "[rack] WARNING: no controller for '%s' — cannot set component handler\n",
+                plugin->path.c_str());
     }
 
     return plugin;
@@ -1662,6 +1729,16 @@ void rack_vst3_plugin_set_resize_callback(
 ) {
     if (!plugin || !plugin->plug_frame) return;
     plugin->plug_frame->setResizeCallback(callback, context);
+}
+
+void rack_vst3_plugin_set_state_change_callback(
+    RackVST3Plugin* plugin,
+    void (*callback)(void* context, int32_t flags),
+    void* context
+) {
+    if (!plugin) return;
+    plugin->state_change_callback = callback;
+    plugin->state_change_context = context;
 }
 
 int rack_vst3_plugin_notify_size(RackVST3Plugin* plugin, int32_t width, int32_t height) {

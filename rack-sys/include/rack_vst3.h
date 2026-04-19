@@ -338,6 +338,14 @@ void rack_vst3_plugin_set_resize_callback(
     void* context
 );
 
+// Set a callback for when the plugin's state changes.
+// Fired by both performEdit (flags = -1) and restartComponent (flags = VST3 restart flags).
+void rack_vst3_plugin_set_state_change_callback(
+    RackVST3Plugin* plugin,
+    void (*callback)(void* context, int32_t flags),
+    void* context
+);
+
 // Notify the plugin that the host window has been resized
 // Call this when the NSWindow content view changes size
 // Returns 0 on success, negative error code on failure

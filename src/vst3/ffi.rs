@@ -568,6 +568,11 @@ extern "C" {
         callback: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, i32)>,
         context: *mut std::ffi::c_void,
     );
+    pub fn rack_vst3_plugin_set_state_change_callback(
+        plugin: *mut RackVST3Plugin,
+        callback: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+        context: *mut std::ffi::c_void,
+    );
     pub fn rack_vst3_plugin_notify_size(
         plugin: *mut RackVST3Plugin,
         width: i32,

@@ -186,6 +186,26 @@ impl Vst3Plugin {
         );
     }
 
+    /// Set a callback that fires when the plugin signals a state change
+    /// (via `IComponentHandler::restartComponent`).
+    ///
+    /// The `flags` parameter contains the VST3 restart flags
+    /// (e.g. `kParamValuesChanged`).
+    ///
+    /// # Safety
+    /// The callback and context must remain valid for the lifetime of the plugin.
+    pub unsafe fn set_state_change_callback(
+        &mut self,
+        callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32),
+        context: *mut std::ffi::c_void,
+    ) {
+        ffi::rack_vst3_plugin_set_state_change_callback(
+            self.inner.as_ptr(),
+            Some(callback),
+            context,
+        );
+    }
+
     /// Notify the plugin that the host window has been resized.
     pub fn notify_size(&mut self, width: i32, height: i32) -> Result<()> {
         let r = unsafe { ffi::rack_vst3_plugin_notify_size(self.inner.as_ptr(), width, height) };
